@@ -49,8 +49,10 @@ Same pipeline logic, NN inference dispatched to CoreML. Latency per frame
 |---|---|---|---|
 | coreml fp16 ANE | **0.7 ms** | 1.9 ms | 7.7e-4 |
 | coreml fp16 GPU | 2.4 ms | 3.9 ms | 4.7e-4 |
+| mediapipe (XNNPACK CPU) | 3.3 ms | 8.7 ms | — |
 | coreml fp32 CPU | 4.2 ms | 8.9 ms | 7.4e-6 |
 | pytorch MPS | 6.7 ms | 12.0 ms | 1.1e-5 |
+| pytorch CPU | 237 ms | 237 ms | 9.5e-6 |
 
 fp16 deviations (~1e-3) are inherent to the Neural Engine's half-precision
 arithmetic — visually indistinguishable; use the fp32 variant when numbers
