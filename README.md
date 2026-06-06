@@ -17,7 +17,14 @@ uv run python tflite_to_torch.py models/extracted/hand_landmarks_detector.tflite
 uv run python run_mediapipe.py test_images/armandhand.JPG          # reference (mediapipe API)
 uv run python run_mediapipe_pytorch.py test_images/armandhand.JPG  # pure pytorch
 uv run python compare_outputs.py                                   # verify they agree
+
+uv run python run_webcam.py                                        # live, pure pytorch
+uv run python run_webcam_mediapipe.py                              # live, official API
 ```
+
+On Apple Silicon the live script defaults to the GPU (`--device mps`, ~75 FPS).
+`--device cpu` matches MediaPipe most closely but PyTorch's CPU depthwise-conv
+path is slow (~4 FPS); MPS adds only ~1e-5 float noise.
 
 ## Architecture
 
@@ -56,6 +63,7 @@ image ──letterbox 192×192──▶ palm detector ──decode+weighted NMS�
 ## Files
 
 - `run_mediapipe_pytorch.py` — the port: letterbox → palm detector → weighted NMS → ROI rect → crop → landmark model → projection, mirroring MediaPipe's calculators in float32 op order
+- `run_webcam.py` / `run_webcam_mediapipe.py` — live webcam demos (keypoints + FPS), pytorch vs official API
 - `tflite_to_torch.py` / `tflite_graph.py` — extract TFLite weights to `.pt` / execute them with torch ops
 - `verify_conversion.py`, `debug_pipeline.py`, `debug_tap_*.py` — verification tooling (the `debug_tap_*` scripts need a side venv with `mediapipe==0.10.14` to inspect MediaPipe internals)
 

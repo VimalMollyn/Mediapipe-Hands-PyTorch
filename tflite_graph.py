@@ -1,7 +1,10 @@
 """Pure-PyTorch executor for graph specs exported by tflite_to_torch.py.
 
-Tensors are kept in TFLite's native layout (NHWC for 4D); convolutions and
-pooling permute to NCHW internally. All arithmetic is float32 torch.
+Activations are kept in NCHW (PyTorch-native) layout throughout; the input is
+permuted once from TFLite's NHWC and ops with layout-dependent semantics
+(RESHAPE, CONCATENATION, MEAN, PAD) are remapped at load time. Conv inputs are
+therefore contiguous NCHW tensors, which is both the fast path and numerically
+identical (layout does not change values or accumulation order).
 """
 
 import torch
@@ -28,6 +31,10 @@ def _activate(x: torch.Tensor, act: str) -> torch.Tensor:
     raise NotImplementedError(act)
 
 
+# NHWC dim index -> NCHW dim index, for 4D tensors
+_NHWC_TO_NCHW_AXIS = {0: 0, 1: 2, 2: 3, 3: 1}
+
+
 class TFLiteModule(torch.nn.Module):
     def __init__(self, spec_path: str):
         super().__init__()
@@ -36,18 +43,43 @@ class TFLiteModule(torch.nn.Module):
         self.input_ids = graph["inputs"]
         self.output_ids = graph["outputs"]
         self.names = graph["names"]
+        shapes = graph["shapes"]
         self.weights = {}
         for k, w in graph["weights"].items():
             name = f"w{k}"
             self.register_buffer(name, w)
             self.weights[k] = name
 
+        # --- remap layout-dependent ops from NHWC to NCHW semantics ---
+        for op in self.ops:
+            t, ins, outs, o = op["type"], op["inputs"], op["outputs"], op["options"]
+            if t == "PRELU" and len(shapes[ins[1]]) == 3:
+                # alpha [1, 1, C] -> [C, 1, 1] so it broadcasts over NCHW
+                w = getattr(self, self.weights[ins[1]])
+                setattr(self, self.weights[ins[1]],
+                        w.permute(2, 0, 1).contiguous())
+            elif t == "CONCATENATION" and len(shapes[outs[0]]) == 4:
+                o["axis"] = _NHWC_TO_NCHW_AXIS[o["axis"] % 4]
+            elif t == "MEAN" and len(shapes[ins[0]]) == 4:
+                o["axes"] = [_NHWC_TO_NCHW_AXIS[a % 4] for a in o["axes"]]
+            elif t == "PAD" and len(shapes[ins[0]]) == 4:
+                n, h, w_, c = o["paddings"]
+                o["paddings"] = [n, c, h, w_]  # NCHW row order
+            elif t == "RESHAPE":
+                # reshape semantics are defined on the NHWC tensor: flag a
+                # permute-back when the input is 4D (rare: detector heads only)
+                o["from_4d"] = len(shapes[ins[0]]) == 4
+                o["to_4d"] = len(o["shape"]) == 4
+
     def _const(self, idx: int) -> torch.Tensor:
         return getattr(self, self.weights[idx])
 
     def forward(self, x: torch.Tensor) -> list[torch.Tensor]:
-        """x: [1, H, W, C] float32 (NHWC, same as TFLite input). Returns output tensors in model order."""
-        env: dict[int, torch.Tensor] = {self.input_ids[0]: x}
+        """x: [1, H, W, C] float32 (NHWC, like TFLite). Returns the model's
+        output tensors in model order (4D outputs would be NHWC)."""
+        env: dict[int, torch.Tensor] = {
+            self.input_ids[0]: x.permute(0, 3, 1, 2).contiguous()
+        }
 
         def get(idx: int) -> torch.Tensor:
             return env[idx] if idx in env else self._const(idx)
@@ -57,56 +89,66 @@ class TFLiteModule(torch.nn.Module):
             ins, outs, o = op["inputs"], op["outputs"], op["options"]
 
             if t in ("CONV_2D", "DEPTHWISE_CONV_2D"):
-                xin = get(ins[0]).permute(0, 3, 1, 2)  # NHWC -> NCHW
+                xin = get(ins[0])
                 w = self._const(ins[1])
                 b = self._const(ins[2]) if len(ins) > 2 else None
                 sh, sw = o["stride"]
                 dh, dw = o["dilation"]
                 kh, kw = w.shape[2], w.shape[3]
+                conv_pad = (0, 0)
                 if o["padding"] == "same":
                     pt, pb = _same_pad(xin.shape[2], kh, sh, dh)
                     pl, pr = _same_pad(xin.shape[3], kw, sw, dw)
-                    xin = F.pad(xin, (pl, pr, pt, pb))
+                    if pt == pb and pl == pr:
+                        conv_pad = (pt, pl)  # symmetric: use conv2d's own padding
+                    elif pt or pb or pl or pr:
+                        xin = F.pad(xin, (pl, pr, pt, pb))
                 groups = 1 if t == "CONV_2D" else xin.shape[1]
-                y = F.conv2d(xin, w, b, stride=(sh, sw), dilation=(dh, dw), groups=groups)
-                env[outs[0]] = _activate(y, o["activation"]).permute(0, 2, 3, 1)
+                y = F.conv2d(xin, w, b, stride=(sh, sw), padding=conv_pad,
+                             dilation=(dh, dw), groups=groups)
+                env[outs[0]] = _activate(y, o["activation"])
 
             elif t == "PRELU":
                 xin = get(ins[0])
-                alpha = self._const(ins[1])  # broadcastable in NHWC, e.g. [1,1,C]
+                alpha = self._const(ins[1])
                 env[outs[0]] = torch.where(xin >= 0, xin, xin * alpha)
 
             elif t == "ADD":
                 env[outs[0]] = _activate(get(ins[0]) + get(ins[1]), o["activation"])
 
             elif t == "MAX_POOL_2D":
-                xin = get(ins[0]).permute(0, 3, 1, 2)
+                xin = get(ins[0])
                 fh, fw = o["filter"]
                 sh, sw = o["stride"]
                 if o["padding"] == "same":
                     pt, pb = _same_pad(xin.shape[2], fh, sh, 1)
                     pl, pr = _same_pad(xin.shape[3], fw, sw, 1)
-                    xin = F.pad(xin, (pl, pr, pt, pb), value=float("-inf"))
+                    if pt or pb or pl or pr:
+                        xin = F.pad(xin, (pl, pr, pt, pb), value=float("-inf"))
                 y = F.max_pool2d(xin, (fh, fw), (sh, sw))
-                env[outs[0]] = _activate(y, o["activation"]).permute(0, 2, 3, 1)
+                env[outs[0]] = _activate(y, o["activation"])
 
             elif t == "PAD":
-                p = o["paddings"]  # [[n,n],[h,h],[w,w],[c,c]] for 4D NHWC
+                p = o["paddings"]
                 flat = []
                 for dim in reversed(p):
                     flat.extend(dim)
                 env[outs[0]] = F.pad(get(ins[0]), flat)
 
             elif t == "RESIZE_BILINEAR":
-                xin = get(ins[0]).permute(0, 3, 1, 2)
-                y = F.interpolate(
-                    xin, size=tuple(o["size"]), mode="bilinear",
+                env[outs[0]] = F.interpolate(
+                    get(ins[0]), size=tuple(o["size"]), mode="bilinear",
                     align_corners=o["align_corners"],
                 )
-                env[outs[0]] = y.permute(0, 2, 3, 1)
 
             elif t == "RESHAPE":
-                env[outs[0]] = get(ins[0]).reshape(o["shape"])
+                xin = get(ins[0])
+                if o["from_4d"]:
+                    xin = xin.permute(0, 2, 3, 1)  # back to NHWC semantics
+                y = xin.reshape(o["shape"])
+                if o["to_4d"]:
+                    y = y.permute(0, 3, 1, 2)
+                env[outs[0]] = y
 
             elif t == "CONCATENATION":
                 y = torch.cat([get(i) for i in ins], dim=o["axis"])
@@ -126,4 +168,10 @@ class TFLiteModule(torch.nn.Module):
             else:
                 raise NotImplementedError(t)
 
-        return [env[i] for i in self.output_ids]
+        outs = []
+        for i in self.output_ids:
+            y = env[i]
+            if y.dim() == 4:
+                y = y.permute(0, 2, 3, 1)
+            outs.append(y)
+        return outs

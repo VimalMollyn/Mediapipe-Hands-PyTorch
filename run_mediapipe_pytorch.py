@@ -229,11 +229,19 @@ def project_detection(det, project):
 # ----------------------------------------------------------------------------
 class HandLandmarkerTorch:
     def __init__(self, detector_path="models/hand_detector.pt",
-                 landmark_path="models/hand_landmarks_detector.pt", num_hands=2):
-        self.detector = TFLiteModule(detector_path).eval()
-        self.landmarker = TFLiteModule(landmark_path).eval()
+                 landmark_path="models/hand_landmarks_detector.pt", num_hands=2,
+                 device="cpu"):
+        """device: 'cpu' matches MediaPipe most closely (XNNPACK noise floor);
+        'mps' runs ~15x faster on Apple GPUs with ~1e-5 extra float noise."""
+        self.device = torch.device(device)
+        self.detector = TFLiteModule(detector_path).eval().to(self.device)
+        self.landmarker = TFLiteModule(landmark_path).eval().to(self.device)
         self.anchors = generate_anchors()
         self.num_hands = num_hands
+
+    def _run(self, model, crop):
+        x = torch.from_numpy(crop[None]).to(self.device)
+        return [o.cpu() for o in model(x)]
 
     @torch.no_grad()
     def __call__(self, image_rgb: np.ndarray):
@@ -243,7 +251,7 @@ class HandLandmarkerTorch:
         side = max(iw, ih)
         crop = crop_rotated_rect(image_rgb, F(0.5) * F(iw), F(0.5) * F(ih),
                                  side, side, 0.0, DETECT_SIZE, cv2.BORDER_CONSTANT)
-        raw_boxes, raw_scores = self.detector(torch.from_numpy(crop[None]))
+        raw_boxes, raw_scores = self._run(self.detector, crop)
         dets = decode_detections(raw_boxes[0], raw_scores[0], self.anchors)
         dets = weighted_nms(dets)
 
@@ -282,8 +290,7 @@ class HandLandmarkerTorch:
             image_rgb, F(cx) * F(iw), F(cy) * F(ih), F(rect_w) * F(iw),
             F(rect_h) * F(ih), rotation, LANDMARK_SIZE, cv2.BORDER_REPLICATE,
         )
-        lm_raw, presence, handedness_raw, world_raw = self.landmarker(
-            torch.from_numpy(crop[None]))
+        lm_raw, presence, handedness_raw, world_raw = self._run(self.landmarker, crop)
 
         # ThresholdingCalculator: hand is present only if score > threshold
         if not F(presence.item()) > MIN_HAND_PRESENCE_CONFIDENCE:
@@ -339,6 +346,8 @@ def main():
     parser.add_argument("image", help="path to input image")
     parser.add_argument("--out", default="output_pytorch.jpg", help="annotated output image")
     parser.add_argument("--json", default="output_pytorch.json", help="landmark JSON dump")
+    parser.add_argument("--device", default="cpu", choices=["cpu", "mps"],
+                        help="cpu = closest to mediapipe; mps = ~15x faster")
     args = parser.parse_args()
 
     image_bgr = cv2.imread(args.image)
@@ -346,7 +355,7 @@ def main():
         raise FileNotFoundError(f"could not read image: {args.image}")
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
-    model = HandLandmarkerTorch()
+    model = HandLandmarkerTorch(device=args.device)
     hands = model(image_rgb)
 
     print(f"detected {len(hands)} hand(s)")
