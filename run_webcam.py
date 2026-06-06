@@ -66,13 +66,20 @@ def main():
     parser.add_argument("--camera", type=int, default=0, help="webcam index")
     parser.add_argument("--mirror", action="store_true", help="selfie view (flip before inference)")
     parser.add_argument("--num-hands", type=int, default=2)
+    parser.add_argument("--backend", default="torch", choices=["torch", "coreml"],
+                        help="coreml runs on the Neural Engine (~10x faster)")
     parser.add_argument("--device", default=None, choices=["cpu", "mps"],
-                        help="default: mps if available, else cpu")
+                        help="torch backend only; default: mps if available")
     args = parser.parse_args()
 
-    device = args.device or ("mps" if torch.backends.mps.is_available() else "cpu")
-    print(f"running on {device}")
-    model = HandLandmarkerTorch(num_hands=args.num_hands, device=device)
+    if args.backend == "coreml":
+        from run_mediapipe_coreml import make_coreml_landmarker
+        print("running on coreml (ALL: ANE/GPU/CPU)")
+        model = make_coreml_landmarker(num_hands=args.num_hands)
+    else:
+        device = args.device or ("mps" if torch.backends.mps.is_available() else "cpu")
+        print(f"running on torch/{device}")
+        model = HandLandmarkerTorch(num_hands=args.num_hands, device=device)
 
     cap = Camera(args.camera)
 

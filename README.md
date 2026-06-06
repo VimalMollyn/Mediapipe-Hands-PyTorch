@@ -33,6 +33,29 @@ On Apple Silicon the pytorch live script defaults to the GPU (`--device mps`).
 `--device cpu` matches MediaPipe most closely but PyTorch's CPU depthwise-conv
 path is slow (~4 FPS); MPS adds only ~1e-5 float noise.
 
+## CoreML port (Neural Engine)
+
+```sh
+uv run python tflite_to_coreml.py            # fp16 .mlpackage (ANE-capable)
+uv run python tflite_to_coreml.py --fp32     # fp32 variant (CPU/GPU only)
+uv run python run_mediapipe_coreml.py test_images/armandhand.JPG
+uv run python run_webcam.py --backend coreml
+```
+
+Same pipeline logic, NN inference dispatched to CoreML. Latency per frame
+(M4, 540x720 frame, single hand):
+
+| backend | tracking | detect+track | landmark dev vs mediapipe |
+|---|---|---|---|
+| coreml fp16 ANE | **0.7 ms** | 1.9 ms | 7.7e-4 |
+| coreml fp16 GPU | 2.4 ms | 3.9 ms | 4.7e-4 |
+| coreml fp32 CPU | 4.2 ms | 8.9 ms | 7.4e-6 |
+| pytorch MPS | 6.7 ms | 12.0 ms | 1.1e-5 |
+
+fp16 deviations (~1e-3) are inherent to the Neural Engine's half-precision
+arithmetic — visually indistinguishable; use the fp32 variant when numbers
+need to match the reference closely.
+
 ## Architecture
 
 The `.task` bundle is a zip of two fp16 TFLite models that form a two-stage pipeline:
@@ -72,6 +95,7 @@ image ──letterbox 192×192──▶ palm detector ──decode+weighted NMS�
 - `run_mediapipe_pytorch.py` — the port: letterbox → palm detector → weighted NMS → ROI rect → crop → landmark model → projection, mirroring MediaPipe's calculators in float32 op order
 - `run_webcam.py` / `run_webcam_mediapipe.py` — live webcam demos (keypoints + FPS), pytorch vs official API
 - `tflite_to_torch.py` / `tflite_graph.py` — extract TFLite weights to `.pt` / execute them with torch ops
+- `tflite_to_coreml.py` / `run_mediapipe_coreml.py` — CoreML conversion and runner (Neural Engine)
 - `verify_conversion.py`, `debug_pipeline.py`, `debug_tap_*.py` — verification tooling (the `debug_tap_*` scripts need a side venv with `mediapipe==0.10.14` to inspect MediaPipe internals)
 
 ## Fidelity

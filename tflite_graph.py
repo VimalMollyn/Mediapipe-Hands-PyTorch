@@ -50,9 +50,28 @@ class TFLiteModule(torch.nn.Module):
             self.register_buffer(name, w)
             self.weights[k] = name
 
-        # --- remap layout-dependent ops from NHWC to NCHW semantics ---
+        # --- remap layout-dependent ops from NHWC to NCHW semantics, and
+        # resolve all static shape-dependent values (paddings, groups) so the
+        # forward pass makes no .shape queries (keeps jit traces clean) ---
         for op in self.ops:
             t, ins, outs, o = op["type"], op["inputs"], op["outputs"], op["options"]
+            if t in ("CONV_2D", "DEPTHWISE_CONV_2D", "MAX_POOL_2D"):
+                in_h, in_w = shapes[ins[0]][1], shapes[ins[0]][2]  # NHWC
+                if t == "MAX_POOL_2D":
+                    kh, kw = o["filter"]
+                    dh = dw = 1
+                else:
+                    kh, kw = graph["weights"][ins[1]].shape[2:]
+                    dh, dw = o["dilation"]
+                    o["groups"] = 1 if t == "CONV_2D" else shapes[ins[0]][3]
+                o["conv_pad"], o["pre_pad"] = (0, 0), None
+                if o["padding"] == "same":
+                    pt, pb = _same_pad(in_h, kh, o["stride"][0], dh)
+                    pl, pr = _same_pad(in_w, kw, o["stride"][1], dw)
+                    if pt == pb and pl == pr and t != "MAX_POOL_2D":
+                        o["conv_pad"] = (pt, pl)  # symmetric: conv2d's own padding
+                    elif pt or pb or pl or pr:
+                        o["pre_pad"] = (pl, pr, pt, pb)
             if t == "PRELU" and len(shapes[ins[1]]) == 3:
                 # alpha [1, 1, C] -> [C, 1, 1] so it broadcasts over NCHW
                 w = getattr(self, self.weights[ins[1]])
@@ -92,20 +111,10 @@ class TFLiteModule(torch.nn.Module):
                 xin = get(ins[0])
                 w = self._const(ins[1])
                 b = self._const(ins[2]) if len(ins) > 2 else None
-                sh, sw = o["stride"]
-                dh, dw = o["dilation"]
-                kh, kw = w.shape[2], w.shape[3]
-                conv_pad = (0, 0)
-                if o["padding"] == "same":
-                    pt, pb = _same_pad(xin.shape[2], kh, sh, dh)
-                    pl, pr = _same_pad(xin.shape[3], kw, sw, dw)
-                    if pt == pb and pl == pr:
-                        conv_pad = (pt, pl)  # symmetric: use conv2d's own padding
-                    elif pt or pb or pl or pr:
-                        xin = F.pad(xin, (pl, pr, pt, pb))
-                groups = 1 if t == "CONV_2D" else xin.shape[1]
-                y = F.conv2d(xin, w, b, stride=(sh, sw), padding=conv_pad,
-                             dilation=(dh, dw), groups=groups)
+                if o["pre_pad"] is not None:
+                    xin = F.pad(xin, o["pre_pad"])
+                y = F.conv2d(xin, w, b, stride=o["stride"], padding=o["conv_pad"],
+                             dilation=o["dilation"], groups=o["groups"])
                 env[outs[0]] = _activate(y, o["activation"])
 
             elif t == "PRELU":
@@ -118,14 +127,9 @@ class TFLiteModule(torch.nn.Module):
 
             elif t == "MAX_POOL_2D":
                 xin = get(ins[0])
-                fh, fw = o["filter"]
-                sh, sw = o["stride"]
-                if o["padding"] == "same":
-                    pt, pb = _same_pad(xin.shape[2], fh, sh, 1)
-                    pl, pr = _same_pad(xin.shape[3], fw, sw, 1)
-                    if pt or pb or pl or pr:
-                        xin = F.pad(xin, (pl, pr, pt, pb), value=float("-inf"))
-                y = F.max_pool2d(xin, (fh, fw), (sh, sw))
+                if o["pre_pad"] is not None:
+                    xin = F.pad(xin, o["pre_pad"], value=float("-inf"))
+                y = F.max_pool2d(xin, o["filter"], o["stride"])
                 env[outs[0]] = _activate(y, o["activation"])
 
             elif t == "PAD":
