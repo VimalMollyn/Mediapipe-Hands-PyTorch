@@ -1,0 +1,16 @@
+[project]
+name = "mediapipe-pytorch"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "mediapipe>=0.10.35",
+    "numpy>=2.4.6",
+    "opencv-python>=4.13.0.92",
+    "torch>=2.12.0",
+]
+
+[dependency-groups]
+dev = [
+    "ai-edge-litert>=2.1.5",
+    "tflite>=2.18.0",
+]
