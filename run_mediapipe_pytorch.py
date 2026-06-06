@@ -225,6 +225,98 @@ def project_detection(det, project):
 
 
 # ----------------------------------------------------------------------------
+# HandLandmarksToRectCalculator + RectTransformation(2.0, shift_y -0.1,
+# square_long): next-frame ROI from the current landmarks (VIDEO mode).
+# ----------------------------------------------------------------------------
+PARTIAL_LANDMARK_IDS = [0, 1, 2, 3, 5, 6, 9, 10, 13, 14, 17, 18]
+TRACK_RECT_SCALE = F(2.0)
+TRACK_RECT_SHIFT_Y = F(-0.1)
+
+
+def rect_from_landmarks(landmarks, iw, ih):
+    lm = landmarks[PARTIAL_LANDMARK_IDS][:, :2]
+
+    # rotation: wrist -> mean of index/middle/ring MCPs, target pi/2
+    x0, y0 = lm[0, 0] * F(iw), lm[0, 1] * F(ih)
+    x1 = (lm[4, 0] + lm[8, 0]) / F(2.0)   # index, ring
+    y1 = (lm[4, 1] + lm[8, 1]) / F(2.0)
+    x1 = (x1 + lm[6, 0]) / F(2.0) * F(iw)  # middle
+    y1 = (y1 + lm[6, 1]) / F(2.0) * F(ih)
+    rotation = F(normalize_radians(
+        float(F(math.pi * 0.5) - F(math.atan2(-(y1 - y0), x1 - x0)))))
+    rev = -rotation
+
+    # bbox center, then bbox in the de-rotated frame
+    cax = (lm[:, 0].max() + lm[:, 0].min()) / F(2.0)
+    cay = (lm[:, 1].max() + lm[:, 1].min()) / F(2.0)
+    ox = (lm[:, 0] - cax) * F(iw)
+    oy = (lm[:, 1] - cay) * F(ih)
+    px = ox * F(math.cos(rev)) - oy * F(math.sin(rev))
+    py = ox * F(math.sin(rev)) + oy * F(math.cos(rev))
+    pcx = (px.max() + px.min()) / F(2.0)
+    pcy = (py.max() + py.min()) / F(2.0)
+    cx = (pcx * F(math.cos(rotation)) - pcy * F(math.sin(rotation)) + F(iw) * cax) / F(iw)
+    cy = (pcx * F(math.sin(rotation)) + pcy * F(math.cos(rotation)) + F(ih) * cay) / F(ih)
+    w = (px.max() - px.min()) / F(iw)
+    h = (py.max() - py.min()) / F(ih)
+
+    # RectTransformationCalculator: shift, square_long, scale 2.0
+    sin_a, cos_a = F(math.sin(rotation)), F(math.cos(rotation))
+    x_shift = (-F(ih) * h * TRACK_RECT_SHIFT_Y * sin_a) / F(iw)
+    y_shift = (F(ih) * h * TRACK_RECT_SHIFT_Y * cos_a) / F(ih)
+    cx, cy = cx + x_shift, cy + y_shift
+    long_side = max(w * F(iw), h * F(ih))
+    return (cx, cy, long_side / F(iw) * TRACK_RECT_SCALE,
+            long_side / F(ih) * TRACK_RECT_SCALE, rotation)
+
+
+def deduplicate_hands(hands, iw, ih):
+    """HandLandmarksDeduplicationCalculator: suppress a hand if >=10 of its 21
+    landmarks lie within 0.2 x baseline-palm-size of an already-retained hand
+    and their landmark bounding boxes overlap with IoU > 0.2."""
+    def baseline(lm):
+        px = lm[:, :2] * (iw, ih)
+        return max(np.linalg.norm(px[0] - px[5]), np.linalg.norm(px[5] - px[17]),
+                   np.linalg.norm(px[17] - px[0]))
+
+    def bbox_iou(a, b):
+        ax0, ay0 = a[:, 0].min(), a[:, 1].min(); ax1, ay1 = a[:, 0].max(), a[:, 1].max()
+        bx0, by0 = b[:, 0].min(), b[:, 1].min(); bx1, by1 = b[:, 0].max(), b[:, 1].max()
+        xa, ya, xb, yb = max(ax0, bx0), max(ay0, by0), min(ax1, bx1), min(ay1, by1)
+        if xb <= xa or yb <= ya:
+            return 0.0
+        inter = (xb - xa) * (yb - ya)
+        return inter / ((ax1-ax0)*(ay1-ay0) + (bx1-bx0)*(by1-by0) - inter)
+
+    kept = []
+    for h in hands:
+        lm = h["landmarks"]
+        dup = False
+        for k in kept:
+            klm = k["landmarks"]
+            thresh = max(baseline(lm), baseline(klm)) * 0.2
+            dists = np.linalg.norm((lm[:, :2] - klm[:, :2]) * (iw, ih), axis=1)
+            if (dists < thresh).sum() >= 10 and bbox_iou(lm, klm) > 0.2:
+                dup = True
+                break
+        if not dup:
+            kept.append(h)
+    return kept
+
+
+def _rect_iou(a, b):
+    """Axis-aligned IoU of two (cx, cy, w, h, rot) rects, for association."""
+    ax0, ay0 = a[0] - a[2] / 2, a[1] - a[3] / 2
+    bx0, by0 = b[0] - b[2] / 2, b[1] - b[3] / 2
+    xa, ya = max(ax0, bx0), max(ay0, by0)
+    xb, yb = min(ax0 + a[2], bx0 + b[2]), min(ay0 + a[3], by0 + b[3])
+    if xb <= xa or yb <= ya:
+        return 0.0
+    inter = (xb - xa) * (yb - ya)
+    return float(inter / (a[2] * a[3] + b[2] * b[3] - inter))
+
+
+# ----------------------------------------------------------------------------
 # Pipeline
 # ----------------------------------------------------------------------------
 class HandLandmarkerTorch:
@@ -238,6 +330,7 @@ class HandLandmarkerTorch:
         self.landmarker = TFLiteModule(landmark_path).eval().to(self.device)
         self.anchors = generate_anchors()
         self.num_hands = num_hands
+        self._tracked_rects = []  # VIDEO mode: ROIs carried to the next frame
 
     def _run(self, model, crop):
         x = torch.from_numpy(crop[None]).to(self.device)
@@ -245,6 +338,45 @@ class HandLandmarkerTorch:
 
     @torch.no_grad()
     def __call__(self, image_rgb: np.ndarray):
+        """IMAGE mode: palm detection + landmarks every call."""
+        ih, iw = image_rgb.shape[:2]
+        hands = []
+        for rect in self._detect_rects(image_rgb)[: self.num_hands]:
+            hand = self._landmarks(image_rgb, *rect)
+            if hand is not None:
+                hands.append(hand)
+        return deduplicate_hands(hands, iw, ih)
+
+    @torch.no_grad()
+    def detect_video(self, image_rgb: np.ndarray):
+        """VIDEO mode, like MediaPipe's: reuse the previous frame's
+        landmark-derived ROIs and only run palm detection when fewer than
+        num_hands hands are being tracked (HandAssociationCalculator logic:
+        tracked rects take precedence, new detections overlapping IoU>0.5
+        are dropped)."""
+        rects = list(self._tracked_rects)
+        if len(rects) < self.num_hands:
+            for r in self._detect_rects(image_rgb):
+                if all(_rect_iou(r, t) <= 0.5 for t in rects):
+                    rects.append(r)
+            rects = rects[: self.num_hands]
+
+        ih, iw = image_rgb.shape[:2]
+        hands = []
+        for rect in rects:
+            hand = self._landmarks(image_rgb, *rect)
+            if hand is not None:
+                hands.append(hand)
+        hands = deduplicate_hands(hands, iw, ih)
+        self._tracked_rects = [rect_from_landmarks(h["landmarks"], iw, ih)
+                               for h in hands]
+        return hands
+
+    def reset(self):
+        self._tracked_rects = []
+
+    def _detect_rects(self, image_rgb):
+        """Palm detection -> transformed hand ROI rects (cx, cy, w, h, rot)."""
         ih, iw = image_rgb.shape[:2]
 
         # --- palm detection on the letterboxed square ROI of the full image ---
@@ -257,8 +389,8 @@ class HandLandmarkerTorch:
 
         # --- project detections to image space, convert to rects, transform ---
         project = letterbox_projection(iw, ih)
-        hands = []
-        for det in [project_detection(d, project) for d in dets][: self.num_hands]:
+        rects = []
+        for det in [project_detection(d, project) for d in dets]:
             # DetectionsToRectsCalculator
             cx = det["xmin"] + det["w"] / F(2.0)
             cy = det["ymin"] + det["h"] / F(2.0)
@@ -278,11 +410,8 @@ class HandLandmarkerTorch:
             long_side = max(w * F(iw), h * F(ih))
             rect_w = long_side / F(iw) * RECT_SCALE
             rect_h = long_side / F(ih) * RECT_SCALE
-
-            hand = self._landmarks(image_rgb, cx, cy, rect_w, rect_h, rotation)
-            if hand is not None:
-                hands.append(hand)
-        return hands
+            rects.append((cx, cy, rect_w, rect_h, rotation))
+        return rects
 
     def _landmarks(self, image_rgb, cx, cy, rect_w, rect_h, rotation):
         ih, iw = image_rgb.shape[:2]

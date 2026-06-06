@@ -22,7 +22,14 @@ uv run python run_webcam.py                                        # live, pure 
 uv run python run_webcam_mediapipe.py                              # live, official API
 ```
 
-On Apple Silicon the live script defaults to the GPU (`--device mps`, ~75 FPS).
+Both live scripts run VIDEO mode: palm detection is skipped while tracked
+hands == num_hands, with the next frame's ROI derived from the current
+landmarks (HandLandmarksToRectCalculator + dedup, ported faithfully). With one
+hand visible and `--num-hands 2` (the default on both), detection still re-runs
+every frame — MediaPipe's gate works the same way; pass `--num-hands 1` for
+tracking-only speed (~5 ms/frame on MPS vs ~16 ms with re-detection).
+
+On Apple Silicon the pytorch live script defaults to the GPU (`--device mps`).
 `--device cpu` matches MediaPipe most closely but PyTorch's CPU depthwise-conv
 path is slow (~4 FPS); MPS adds only ~1e-5 float noise.
 

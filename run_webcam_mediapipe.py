@@ -16,6 +16,7 @@ from mediapipe.tasks import python as mp_python
 from mediapipe.tasks.python import vision as mp_vision
 
 from run_mediapipe import HAND_CONNECTIONS
+from run_webcam import Camera
 
 
 def draw_hand(frame, landmarks, handedness):
@@ -44,13 +45,12 @@ def main():
         num_hands=args.num_hands,
     )
 
-    cap = cv2.VideoCapture(args.camera)
-    if not cap.isOpened():
-        raise RuntimeError(f"could not open camera {args.camera}")
+    cap = Camera(args.camera)
 
-    fps = 0.0
+    fps, infer_ms = 0.0, 0.0
     prev = time.perf_counter()
     t0 = prev
+    frame_id = 0
     with mp_vision.HandLandmarker.create_from_options(options) as landmarker:
         while True:
             ok, frame = cap.read()
@@ -59,10 +59,12 @@ def main():
             if args.mirror:
                 frame = cv2.flip(frame, 1)
 
+            t1 = time.perf_counter()
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB,
                                 data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            result = landmarker.detect_for_video(
-                mp_image, int((time.perf_counter() - t0) * 1000))
+            frame_id += 1
+            result = landmarker.detect_for_video(mp_image, frame_id * 33)
+            infer_ms = 0.9 * infer_ms + 0.1 * (time.perf_counter() - t1) * 1000
             for landmarks, handedness in zip(result.hand_landmarks, result.handedness):
                 draw_hand(frame, landmarks, handedness)
 
@@ -70,7 +72,7 @@ def main():
             inst = 1.0 / (now - prev)
             prev = now
             fps = inst if fps == 0.0 else 0.9 * fps + 0.1 * inst  # smoothed
-            cv2.putText(frame, f"{fps:.1f} FPS", (10, 30),
+            cv2.putText(frame, f"{fps:.1f} FPS  {infer_ms:.1f} ms", (10, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
 
             cv2.imshow("mediapipe hands (official API)", frame)

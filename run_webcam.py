@@ -7,12 +7,46 @@ Press q or ESC to quit.
 """
 
 import argparse
+import threading
 import time
 
 import cv2
 import torch
 
 from run_mediapipe_pytorch import HAND_CONNECTIONS, HandLandmarkerTorch
+
+
+class Camera:
+    """Threaded capture: always serves the latest frame so the processing
+    loop is never blocked waiting on the camera."""
+
+    def __init__(self, index):
+        self.cap = cv2.VideoCapture(index)
+        if not self.cap.isOpened():
+            raise RuntimeError(f"could not open camera {index}")
+        self.frame = None
+        self.ok = True
+        self.lock = threading.Lock()
+        threading.Thread(target=self._loop, daemon=True).start()
+        while self.ok and self.frame is None:
+            time.sleep(0.01)
+
+    def _loop(self):
+        while self.ok:
+            ok, frame = self.cap.read()
+            if not ok:
+                self.ok = False
+                break
+            with self.lock:
+                self.frame = frame
+
+    def read(self):
+        with self.lock:
+            return self.ok, None if self.frame is None else self.frame.copy()
+
+    def release(self):
+        self.ok = False
+        self.cap.release()
 
 
 def draw_hand(frame, hand):
@@ -40,11 +74,9 @@ def main():
     print(f"running on {device}")
     model = HandLandmarkerTorch(num_hands=args.num_hands, device=device)
 
-    cap = cv2.VideoCapture(args.camera)
-    if not cap.isOpened():
-        raise RuntimeError(f"could not open camera {args.camera}")
+    cap = Camera(args.camera)
 
-    fps = 0.0
+    fps, infer_ms = 0.0, 0.0
     prev = time.perf_counter()
     while True:
         ok, frame = cap.read()
@@ -53,7 +85,11 @@ def main():
         if args.mirror:
             frame = cv2.flip(frame, 1)
 
-        hands = model(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        t0 = time.perf_counter()
+        # VIDEO mode: palm detection is skipped while hands are tracked,
+        # next-frame ROIs come from the current landmarks (like mediapipe)
+        hands = model.detect_video(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+        infer_ms = 0.9 * infer_ms + 0.1 * (time.perf_counter() - t0) * 1000
         for hand in hands:
             draw_hand(frame, hand)
 
@@ -61,7 +97,7 @@ def main():
         inst = 1.0 / (now - prev)
         prev = now
         fps = inst if fps == 0.0 else 0.9 * fps + 0.1 * inst  # smoothed
-        cv2.putText(frame, f"{fps:.1f} FPS", (10, 30),
+        cv2.putText(frame, f"{fps:.1f} FPS  {infer_ms:.1f} ms", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
 
         cv2.imshow("mediapipe-pytorch hands", frame)
