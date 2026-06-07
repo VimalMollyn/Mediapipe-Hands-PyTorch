@@ -55,3 +55,6 @@ The `hand_landmarker.task` models are converted to CoreML, and every MediaPipe
 calculator in the pipeline (anchors, decode, weighted NMS, rect transforms,
 rotated crops, projections, VIDEO-mode ROI tracking, dedup) is reimplemented
 in numpy with float32 op-order fidelity. Model weights © Google, Apache 2.0.
+
+Source, the PyTorch reference implementation, and the full verification
+harness: https://github.com/VimalMollyn/fasthands

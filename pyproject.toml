@@ -18,6 +18,9 @@ dependencies = [
     "opencv-python>=4.8",
 ]
 
+[project.urls]
+Repository = "https://github.com/VimalMollyn/fasthands"
+
 [project.scripts]
 fasthands = "fasthands.cli:main"
 fasthands-webcam = "fasthands.cli:webcam"
