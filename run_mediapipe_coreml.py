@@ -1,8 +1,7 @@
 """Run MediaPipe Hands with CoreML inference (Neural Engine capable).
 
-Same pipeline logic as run_mediapipe_pytorch.py (which stays the numerical
-reference); only the two NN inferences are dispatched to CoreML .mlpackage
-models produced by tflite_to_coreml.py.
+Thin wrapper around the fasthands package; the --fp32 flag swaps in the
+repo-local fp32 .mlpackage models (CPU/GPU only, reference-grade accuracy).
 
 Usage:
     python run_mediapipe_coreml.py <image_path> [--compute-units ALL] [--fp32]
@@ -11,35 +10,19 @@ Usage:
 import argparse
 import json
 
-import coremltools as ct
 import cv2
-import torch
 
-from run_mediapipe_pytorch import HandLandmarkerTorch, draw
-
-
-class CoreMLBackend:
-    """Mimics TFLiteModule's interface: tensor in, list of tensors out."""
-
-    def __init__(self, path, compute_units):
-        self.model = ct.models.MLModel(
-            path, compute_units=ct.ComputeUnit[compute_units])
-        spec = self.model.get_spec()
-        self.output_names = [o.name for o in spec.description.output]
-
-    def __call__(self, x: torch.Tensor):
-        out = self.model.predict({"image": x.numpy()})
-        return [torch.from_numpy(out[n]) for n in self.output_names]
+from fasthands.coreml import CoreMLBackend
+from fasthands.pipeline import HandLandmarker, draw
 
 
 def make_coreml_landmarker(num_hands=2, compute_units="ALL", fp32=False):
     suffix = "_fp32" if fp32 else ""
-    model = HandLandmarkerTorch(num_hands=num_hands, device="cpu")
-    model.detector = CoreMLBackend(
-        f"models/hand_detector{suffix}.mlpackage", compute_units)
-    model.landmarker = CoreMLBackend(
-        f"models/hand_landmarks_detector{suffix}.mlpackage", compute_units)
-    return model
+    return HandLandmarker(
+        CoreMLBackend(f"models/hand_detector{suffix}.mlpackage", compute_units),
+        CoreMLBackend(f"models/hand_landmarks_detector{suffix}.mlpackage", compute_units),
+        num_hands=num_hands,
+    )
 
 
 def main():

@@ -4,7 +4,20 @@
 The CoreML/Neural Engine port tracks a hand in **0.7 ms/frame** (vs MediaPipe's
 3.3 ms on the same M4), with the same models and a faithfully ported pipeline.
 
-MediaPipe Hands (`hand_landmarker.task`) running entirely in PyTorch — no mediapipe dependency at inference time — plus a CoreML port for the Neural Engine.
+MediaPipe Hands (`hand_landmarker.task`) running entirely in PyTorch — no mediapipe dependency at inference time — plus a CoreML port for the Neural Engine, packaged as **[`fasthands`](PYPI_README.md)**:
+
+```sh
+pip install fasthands     # macOS: coremltools + numpy + opencv only, no torch
+```
+```python
+import fasthands
+tracker = fasthands.load(num_hands=1)
+hands = tracker.detect_video(rgb_frame)   # 0.7 ms/frame on the Neural Engine
+```
+
+The pip package ships only the CoreML pipeline (`src/fasthands/`, models
+bundled). The PyTorch backend, extraction tooling and verification harness
+live in this repo and share the same pipeline code (`fasthands.pipeline`).
 
 ## Setup
 

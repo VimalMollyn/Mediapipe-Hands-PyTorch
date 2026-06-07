@@ -73,9 +73,9 @@ def main():
     args = parser.parse_args()
 
     if args.backend == "coreml":
-        from run_mediapipe_coreml import make_coreml_landmarker
+        import fasthands
         print("running on coreml (ALL: ANE/GPU/CPU)")
-        model = make_coreml_landmarker(num_hands=args.num_hands)
+        model = fasthands.load(num_hands=args.num_hands)
     else:
         device = args.device or ("mps" if torch.backends.mps.is_available() else "cpu")
         print(f"running on torch/{device}")
