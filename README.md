@@ -1,6 +1,10 @@
 # mediapipe-pytorch
 
-MediaPipe Hands (`hand_landmarker.task`) running entirely in PyTorch — no mediapipe dependency at inference time.
+**⚡ FASTEST MEDIAPIPE HAND TRACKER — 5× faster than MediaPipe itself.**
+The CoreML/Neural Engine port tracks a hand in **0.7 ms/frame** (vs MediaPipe's
+3.3 ms on the same M4), with the same models and a faithfully ported pipeline.
+
+MediaPipe Hands (`hand_landmarker.task`) running entirely in PyTorch — no mediapipe dependency at inference time — plus a CoreML port for the Neural Engine.
 
 ## Setup
 
