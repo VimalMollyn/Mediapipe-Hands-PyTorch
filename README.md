@@ -160,12 +160,63 @@ image ──letterbox 192×192──▶ palm detector ──decode+weighted NMS�
   In video mode MediaPipe would reuse last frame's hand rect to skip detection;
   in image mode (this repo) both stages run every time.
 
+## Making the PyTorch path match CoreML
+
+The PyTorch backend (`run_mediapipe_pytorch.py`) is the float32 reference, but
+it's slow live. How fast can it get, and can it match the CoreML/ANE numbers?
+
+**The gap is hardware, and it's provable.** Running the *same* CoreML graph on
+the GPU instead of the Neural Engine gives 1.66 ms vs 0.55 ms (M4, tracking) —
+same framework, same compiled graph, only the silicon changed. The ANE is ~3×
+faster than the GPU here, and **PyTorch can only reach the CPU or GPU, never the
+ANE.** So no amount of fusion or custom kernels lets pure PyTorch hit 0.55 ms.
+
+**Two outcomes, both delivered:**
+
+1. **Pure PyTorch MPS — pushed to the GPU's limit.** `--compile` applies
+   `torch.compile(max-autotune)`, fusing the op graph. Isolated landmark
+   inference drops from 2.4 ms (eager) to ~1.7 ms — at the CoreML-GPU ceiling.
+   The full sequential tracking loop stays ~5–7 ms because each frame forces a
+   sync that exposes ~63 serial MPS kernel launches (the ANE runs the graph as
+   one dispatch; the GPU cannot hide this in a real-time loop). fp16 is *slower*
+   on MPS (its conv path adds casts). This is the GPU's hardware floor.
+
+2. **PyTorch → ANE parity via ExecuTorch.** `executorch_export.py` lowers the
+   PyTorch graphs through PyTorch's own ExecuTorch toolchain with the CoreML
+   delegate, producing `.pte` models that run on the Neural Engine.
+   `executorch_run.py` runs the full pipeline on them:
+
+   | path | tracking | landmark dev vs mediapipe |
+   |---|---|---|
+   | PyTorch MPS (eager) | ~5–7 ms | 1.5e-5 |
+   | PyTorch MPS (`--compile`) | ~5–7 ms (inference ~1.7 ms) | 1.5e-5 |
+   | CoreML GPU | 1.66 ms | — |
+   | **PyTorch via ExecuTorch → ANE** | **0.56 ms** | **8.6e-4** |
+   | CoreML direct → ANE | 0.55 ms | 8.6e-4 |
+
+   The ExecuTorch path is a PyTorch model, exported by PyTorch's toolchain,
+   matching CoreML exactly (0.56 vs 0.55 ms, identical accuracy) — because it
+   runs on the same ANE via the shared CoreML delegate. That is the only way
+   "PyTorch performance" reaches "CoreML performance": same hardware.
+
+```sh
+# pure-MPS, fastest GPU path
+uv run python run_mediapipe_pytorch.py test_images/armandhand.JPG --device mps --compile
+
+# PyTorch -> ANE parity (needs an executorch venv)
+uv venv .venv-et --python 3.12 && .venv-et/bin/pip install executorch opencv-python
+.venv-et/bin/pip install --no-deps .
+.venv-et/bin/python executorch_export.py     # PyTorch graphs -> .pte (ANE)
+.venv-et/bin/python executorch_run.py        # full pipeline on the ANE
+```
+
 ## Files
 
 - `run_mediapipe_pytorch.py` — the port: letterbox → palm detector → weighted NMS → ROI rect → crop → landmark model → projection, mirroring MediaPipe's calculators in float32 op order
 - `run_webcam.py` / `run_webcam_mediapipe.py` — live webcam demos (keypoints + FPS), pytorch vs official API
 - `tflite_to_torch.py` / `tflite_graph.py` — extract TFLite weights to `.pt` / execute them with torch ops
 - `tflite_to_coreml.py` / `run_mediapipe_coreml.py` — CoreML conversion and runner (Neural Engine)
+- `executorch_export.py` / `executorch_run.py` — export the PyTorch graphs to ExecuTorch `.pte` on the ANE (CoreML delegate) and run the full pipeline; PyTorch→ANE parity
 - `verify_conversion.py`, `debug_pipeline.py`, `debug_tap_*.py` — verification tooling (the `debug_tap_*` scripts need a side venv with `mediapipe==0.10.14` to inspect MediaPipe internals)
 
 ## Fidelity

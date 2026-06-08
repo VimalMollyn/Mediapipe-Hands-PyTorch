@@ -41,11 +41,17 @@ from tflite_graph import TFLiteModule
 
 
 class TorchBackend:
-    """numpy in / numpy out wrapper around the extracted-graph torch module."""
+    """numpy in / numpy out wrapper around the extracted-graph torch module.
 
-    def __init__(self, path, device):
+    compile=True applies torch.compile(mode="max-autotune"); on MPS this fuses
+    the op graph and is the fastest pure-PyTorch path (the GPU is hardware-bound
+    at ~3x the ANE, so it cannot reach the CoreML/ANE number -- see README and
+    executorch_export.py for the PyTorch->ANE parity route)."""
+
+    def __init__(self, path, device, compile=False):
         self.device = torch.device(device)
-        self.module = TFLiteModule(path).eval().to(self.device)
+        module = TFLiteModule(path).eval().to(self.device)
+        self.module = torch.compile(module, mode="max-autotune") if compile else module
 
     @torch.no_grad()
     def __call__(self, x: np.ndarray):
@@ -56,11 +62,13 @@ class TorchBackend:
 class HandLandmarkerTorch(HandLandmarker):
     def __init__(self, detector_path="models/hand_detector.pt",
                  landmark_path="models/hand_landmarks_detector.pt", num_hands=2,
-                 device="cpu"):
+                 device="cpu", compile=False):
         """device: 'cpu' matches MediaPipe most closely (XNNPACK noise floor);
-        'mps' runs ~15x faster on Apple GPUs with ~1e-5 extra float noise."""
-        super().__init__(TorchBackend(detector_path, device),
-                         TorchBackend(landmark_path, device), num_hands=num_hands)
+        'mps' runs on the Apple GPU. compile=True applies torch.compile
+        (max-autotune) for the fastest pure-PyTorch path."""
+        super().__init__(TorchBackend(detector_path, device, compile),
+                         TorchBackend(landmark_path, device, compile),
+                         num_hands=num_hands)
 
 
 def main():
@@ -69,7 +77,9 @@ def main():
     parser.add_argument("--out", default="output_pytorch.jpg", help="annotated output image")
     parser.add_argument("--json", default="output_pytorch.json", help="landmark JSON dump")
     parser.add_argument("--device", default="cpu", choices=["cpu", "mps"],
-                        help="cpu = closest to mediapipe; mps = ~15x faster")
+                        help="cpu = closest to mediapipe; mps = Apple GPU")
+    parser.add_argument("--compile", action="store_true",
+                        help="torch.compile(max-autotune) — fastest pure-PyTorch path")
     args = parser.parse_args()
 
     image_bgr = cv2.imread(args.image)
@@ -77,7 +87,7 @@ def main():
         raise FileNotFoundError(f"could not read image: {args.image}")
     image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
 
-    model = HandLandmarkerTorch(device=args.device)
+    model = HandLandmarkerTorch(device=args.device, compile=args.compile)
     hands = model(image_rgb)
 
     print(f"detected {len(hands)} hand(s)")
