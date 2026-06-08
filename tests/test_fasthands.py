@@ -56,3 +56,21 @@ def test_video_mode_tracks(tracker, image_rgb):
 def test_no_hand(tracker):
     blank = np.zeros((480, 640, 3), dtype=np.uint8)
     assert tracker(blank) == []
+
+
+def test_stream_matches_serial(image_rgb):
+    # pipelined stream must yield identical results to a serial video loop
+    bgr = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
+    frames = [bgr.copy() for _ in range(8)]
+
+    serial = fasthands.load(num_hands=1)
+    serial_lms = [serial.detect_video(image_rgb) for _ in frames]
+
+    piped = fasthands.load(num_hands=1)
+    out = list(fasthands.stream(piped, frames, mode="video"))
+
+    assert len(out) == len(frames)
+    for (frame, hands), ref in zip(out, serial_lms):
+        assert len(hands) == len(ref)
+        if hands:
+            assert np.array_equal(hands[0]["landmarks"], ref[0]["landmarks"])

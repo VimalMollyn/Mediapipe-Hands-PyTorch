@@ -32,11 +32,27 @@ for hand in hands:
     print(hand["world_landmarks"])  # 21 x (x, y, z), meters, hand-centered
 ```
 
+Pipelined streaming (overlaps CPU pre/post with Neural Engine inference,
+~15% faster end-to-end — see below):
+
+```python
+import cv2, fasthands
+tracker = fasthands.load(num_hands=1)
+cap = cv2.VideoCapture(0)
+def frames():
+    while True:
+        ok, f = cap.read()
+        if not ok: break
+        yield f
+for frame_bgr, hands in fasthands.stream(tracker, frames()):
+    ...  # draw/use hands; this runs concurrently with the next inference
+```
+
 Or from the command line:
 
 ```sh
 fasthands photo.jpg --out annotated.jpg
-fasthands-webcam --mirror     # live demo with FPS overlay
+fasthands-webcam --mirror     # live demo (pipelined) with FPS overlay
 ```
 
 ## Speed (Apple M4, 540×720 frame, one hand)

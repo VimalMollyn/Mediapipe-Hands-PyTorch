@@ -93,9 +93,30 @@ quantize/dequantize ops can cost more than they save:
 
 Weight-only int8 forces on-the-fly int8→fp16 decompression (pure overhead on a
 fp16 engine). W8A8's 8% landmark gain costs a 25× accuracy hit — not worth it.
-The real remaining lever is *fewer dispatches*: batching both hands into one
-predict (num_hands=2) and pipelining the next frame's crop with the current
-inference. fp16 stays the shipped format.
+fp16 stays the shipped format.
+
+The clinching measurement: a trivial CoreML model's `predict()` floor is
+**0.029 ms**, so coremltools overhead is negligible — the landmark model's
+0.31 ms is genuine ANE *compute* (it's 2.36 ms on CPU). The model is
+compute-bound on the Neural Engine, but in fp16, the ANE's native datatype;
+int8 buys no throughput there (unlike a GPU). That's why both quantization
+*and* custom net kernels can't beat it — fp16 on the ANE is the floor for these
+architectures.
+
+### Pipelined streaming (the lever that does work)
+
+`predict()` releases the GIL during ANE execution, so the frame-independent CPU
+work — BGR→RGB conversion and drawing the previous result — overlaps with the
+current frame's inference. (The crop→predict chain itself stays serial: in
+tracking mode frame N's ROI comes from frame N-1's landmarks.) `fasthands.stream()`
+does this; the webcam CLI uses it:
+
+| full webcam loop (cvt + crop + predict + draw) | ms/frame | FPS |
+|---|---|---|
+| serial | 0.70 | 1426 |
+| **pipelined (`fasthands.stream`)** | **0.60** | **1670** |
+
+~15% end-to-end, bit-identical results (verified in the test suite).
 
 The ANE path is tuned for latency: ROI extraction uses an affine warp
 (`fast_crop`, ~9e-5 vs the exact perspective warp — far below fp16 noise),

@@ -7,7 +7,7 @@ import time
 
 import cv2
 
-from . import load
+from . import load, stream
 from .pipeline import draw
 
 
@@ -95,18 +95,17 @@ def webcam():
     tracker = load(num_hands=args.num_hands, compute_units=args.compute_units)
     cap = _Camera(args.camera)
 
-    fps, infer_ms = 0.0, 0.0
-    prev = time.perf_counter()
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        if args.mirror:
-            frame = cv2.flip(frame, 1)
+    def frames():
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                return
+            yield cv2.flip(frame, 1) if args.mirror else frame
 
-        t0 = time.perf_counter()
-        hands = tracker.detect_video(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        infer_ms = 0.9 * infer_ms + 0.1 * (time.perf_counter() - t0) * 1000
+    fps = 0.0
+    prev = time.perf_counter()
+    # stream() pipelines ANE inference with the per-frame draw/convert below
+    for frame, hands in stream(tracker, frames()):
         frame = draw(frame, hands)
         for hand in hands:
             x, y = hand["landmarks"][0][:2]
@@ -117,7 +116,7 @@ def webcam():
         now = time.perf_counter()
         fps = 0.9 * fps + 0.1 / (now - prev) if fps else 1.0 / (now - prev)
         prev = now
-        cv2.putText(frame, f"{fps:.1f} FPS  {infer_ms:.1f} ms", (10, 30),
+        cv2.putText(frame, f"{fps:.1f} FPS", (10, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 255, 255), 2)
         cv2.imshow("fasthands", frame)
         if cv2.waitKey(1) & 0xFF in (ord("q"), 27):

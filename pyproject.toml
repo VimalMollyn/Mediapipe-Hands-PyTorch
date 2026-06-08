@@ -1,6 +1,6 @@
 [project]
 name = "fasthands"
-version = "0.2.0"
+version = "0.3.0"
 description = "Fastest MediaPipe-compatible hand tracker: hand landmarks on the Apple Neural Engine at 0.7 ms/frame"
 readme = "PYPI_README.md"
 requires-python = ">=3.10"
