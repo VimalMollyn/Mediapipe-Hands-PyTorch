@@ -46,4 +46,5 @@ dev = [
     "tflite>=2.18.0",
     "pytest>=8",
     "scikit-learn>=1.7.2",
+    "mlx>=0.31.2",
 ]

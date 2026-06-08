@@ -190,14 +190,41 @@ ANE.** So no amount of fusion or custom kernels lets pure PyTorch hit 0.55 ms.
    |---|---|---|
    | PyTorch MPS (eager) | ~5–7 ms | 1.5e-5 |
    | PyTorch MPS (`--compile`) | ~5–7 ms (inference ~1.7 ms) | 1.5e-5 |
-   | CoreML GPU | 1.66 ms | — |
+   | MLX (builtin depthwise) | ~6–9 ms | 3.8e-5 |
+   | **MLX (custom Metal depthwise kernel)** | **2.8 ms** | 3.8e-5 |
+   | CoreML GPU | 1.6 ms | — |
    | **PyTorch via ExecuTorch → ANE** | **0.56 ms** | **8.6e-4** |
    | CoreML direct → ANE | 0.55 ms | 8.6e-4 |
+
+   (All GPU/CPU numbers move with thermal state; the table is from one
+   back-to-back run for fair relative comparison.)
 
    The ExecuTorch path is a PyTorch model, exported by PyTorch's toolchain,
    matching CoreML exactly (0.56 vs 0.55 ms, identical accuracy) — because it
    runs on the same ANE via the shared CoreML delegate. That is the only way
    "PyTorch performance" reaches "CoreML performance": same hardware.
+
+### MLX port + a custom Metal kernel
+
+`mlx_graph.py` / `run_mediapipe_mlx.py` port the graphs to **MLX** (Apple's
+array framework — NHWC-native like TFLite, so no layout permutes; unified
+memory, so the numpy boundary is free). Out of the box MLX was no faster than
+PyTorch MPS — profiling showed its **grouped depthwise-conv path is the
+bottleneck** (the 5×5 MobileNet depthwise convs).
+
+So I wrote a **custom Metal depthwise kernel** (`mx.fast.metal_kernel`, one
+thread per output; NHWC makes the channel axis contiguous so neighbouring
+threads coalesce their reads). It's bit-exact and **3.3× faster end-to-end than
+MLX's builtin** (9.1 → 2.8 ms tracking, back-to-back), making MLX the fastest
+framework-on-GPU path here — past PyTorch MPS and approaching the CoreML-GPU
+ceiling. (A float4-vectorized variant gave nothing — the scalar kernel already
+saturates memory bandwidth via coalesced NHWC reads.) The GPU is still ~3× the
+ANE, so this doesn't change the overall winner, but it's a real kernel-level win.
+
+```sh
+uv run python run_mediapipe_mlx.py test_images/armandhand.JPG   # MLX + custom kernel
+uv run python benchmark_all.py                                  # all backends, one table
+```
 
 ```sh
 # pure-MPS, fastest GPU path
@@ -217,6 +244,8 @@ uv venv .venv-et --python 3.12 && .venv-et/bin/pip install executorch opencv-pyt
 - `tflite_to_torch.py` / `tflite_graph.py` — extract TFLite weights to `.pt` / execute them with torch ops
 - `tflite_to_coreml.py` / `run_mediapipe_coreml.py` — CoreML conversion and runner (Neural Engine)
 - `executorch_export.py` / `executorch_run.py` — export the PyTorch graphs to ExecuTorch `.pte` on the ANE (CoreML delegate) and run the full pipeline; PyTorch→ANE parity
+- `mlx_graph.py` / `run_mediapipe_mlx.py` — MLX port with a custom Metal depthwise-conv kernel (3.3× over MLX's builtin)
+- `benchmark_all.py` — one-shot benchmark across CoreML / PyTorch / MLX backends
 - `verify_conversion.py`, `debug_pipeline.py`, `debug_tap_*.py` — verification tooling (the `debug_tap_*` scripts need a side venv with `mediapipe==0.10.14` to inspect MediaPipe internals)
 
 ## Fidelity
