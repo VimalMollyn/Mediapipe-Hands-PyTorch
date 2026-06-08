@@ -221,6 +221,17 @@ ceiling. (A float4-vectorized variant gave nothing — the scalar kernel already
 saturates memory bandwidth via coalesced NHWC reads.) The GPU is still ~3× the
 ANE, so this doesn't change the overall winner, but it's a real kernel-level win.
 
+**Why the same trick does *not* help PyTorch MPS.** I tried the equivalent
+custom Metal kernel for MPS (`torch.mps.compile_shader`), as a drop-in *and* as
+a fused conv+bias+activation kernel. Both were **slower** than the built-in
+(depthwise: 0.054 ms custom vs 0.038 ms MPSGraph, amortized). PyTorch MPS
+delegates conv to Apple's **MPSGraph** — the same mature, highly-tuned library
+CoreML uses on the GPU — so its kernels are already faster than hand-written
+Metal. The MLX win only existed because MLX's young grouped-conv path was the
+weak link. MPS's real bottleneck isn't slow kernels but launch *count* (one
+sync per frame exposing ~60 serial dispatches); the lever there is fusion via
+`torch.compile` (the `--compile` flag), not a custom kernel.
+
 ```sh
 uv run python run_mediapipe_mlx.py test_images/armandhand.JPG   # MLX + custom kernel
 uv run python benchmark_all.py                                  # all backends, one table
