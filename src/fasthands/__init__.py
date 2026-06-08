@@ -13,5 +13,5 @@ frame on Apple Silicon (~5x faster than MediaPipe itself).
 from .coreml import load
 from .pipeline import HAND_CONNECTIONS, HandLandmarker, draw
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __all__ = ["load", "HandLandmarker", "HAND_CONNECTIONS", "draw", "__version__"]

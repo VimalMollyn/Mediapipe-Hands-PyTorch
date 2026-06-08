@@ -25,16 +25,18 @@ class CoreMLBackend:
         return [out[n] for n in self.output_names]
 
 
-def load(num_hands: int = 2, compute_units: str = "ALL",
-         models_dir=MODELS_DIR) -> HandLandmarker:
+def load(num_hands: int = 2, compute_units: str = "CPU_AND_NE",
+         models_dir=MODELS_DIR, fast_crop: bool = True) -> HandLandmarker:
     """Create a HandLandmarker running on CoreML.
 
-    compute_units: ALL (Neural Engine + GPU + CPU), CPU_AND_NE, CPU_AND_GPU,
-    or CPU_ONLY.
+    compute_units: CPU_AND_NE (default — fastest here; the planner sometimes
+    mis-assigns the detector to the GPU under ALL), ALL, CPU_AND_GPU, CPU_ONLY.
+    fast_crop: use the affine warp for ROI extraction (default on; ~9e-5
+    sampling difference, negligible vs fp16 inference noise).
     """
     models_dir = Path(models_dir)
     return HandLandmarker(
         CoreMLBackend(models_dir / "hand_detector.mlpackage", compute_units),
         CoreMLBackend(models_dir / "hand_landmarks_detector.mlpackage", compute_units),
-        num_hands=num_hands,
+        num_hands=num_hands, fast_crop=fast_crop,
     )

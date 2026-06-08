@@ -76,16 +76,29 @@ def generate_anchors() -> np.ndarray:
 # Identical cv2 calls (boxPoints + getPerspectiveTransform + warpPerspective
 # on uint8, then *1/255f like cv::Mat::convertTo with a float scale).
 # ----------------------------------------------------------------------------
-def crop_rotated_rect(image_rgb, cx, cy, w, h, rotation_rad, dst_size, border):
+def crop_rotated_rect(image_rgb, cx, cy, w, h, rotation_rad, dst_size, border,
+                      affine=False):
+    """Rotated sub-rect -> square crop (ImageToTensorCalculator).
+
+    affine=False reproduces MediaPipe's cv::warpPerspective bit-for-bit.
+    affine=True uses cv::warpAffine (the rotated rect IS an affine map, so the
+    last perspective row is 0,0,1) -- ~16% faster, with ~9e-5 sampling
+    difference at borders, far below fp16 inference noise. Used by the CoreML
+    speed path; the float32 reference keeps the exact perspective warp.
+    """
     angle_deg = F(np.float64(F(rotation_rad) * F(180.0)) / math.pi)
     src = cv2.boxPoints(((float(cx), float(cy)), (float(w), float(h)), float(angle_deg)))
-    dst = np.array(
-        [[0, dst_size], [0, 0], [dst_size, 0], [dst_size, dst_size]], dtype=np.float32
-    )
-    m = cv2.getPerspectiveTransform(src.astype(np.float32), dst)
-    crop = cv2.warpPerspective(
-        image_rgb, m, (dst_size, dst_size), flags=cv2.INTER_LINEAR, borderMode=border
-    )
+    if affine:
+        dst = np.array([[0, dst_size], [0, 0], [dst_size, 0]], dtype=np.float32)
+        m = cv2.getAffineTransform(src[:3].astype(np.float32), dst)
+        crop = cv2.warpAffine(image_rgb, m, (dst_size, dst_size),
+                              flags=cv2.INTER_LINEAR, borderMode=border)
+    else:
+        dst = np.array([[0, dst_size], [0, 0], [dst_size, 0], [dst_size, dst_size]],
+                       dtype=np.float32)
+        m = cv2.getPerspectiveTransform(src.astype(np.float32), dst)
+        crop = cv2.warpPerspective(image_rgb, m, (dst_size, dst_size),
+                                   flags=cv2.INTER_LINEAR, borderMode=border)
     return crop.astype(np.float32) * F(1.0 / 255.0)
 
 
@@ -317,11 +330,14 @@ class HandLandmarker:
     in [0,1] to the model's raw output arrays (in model output order).
     """
 
-    def __init__(self, detector, landmarker, num_hands=2):
+    def __init__(self, detector, landmarker, num_hands=2, fast_crop=False):
         self.detector = detector
         self.landmarker = landmarker
         self.anchors = generate_anchors()
         self.num_hands = num_hands
+        # fast_crop: use the affine warp (see crop_rotated_rect). Safe for the
+        # fp16 CoreML path; the float32 reference leaves it off for exactness.
+        self.fast_crop = fast_crop
         self._tracked_rects = []  # VIDEO mode: ROIs carried to the next frame
 
     def __call__(self, image_rgb: np.ndarray):
@@ -368,7 +384,8 @@ class HandLandmarker:
         # --- palm detection on the letterboxed square ROI of the full image ---
         side = max(iw, ih)
         crop = crop_rotated_rect(image_rgb, F(0.5) * F(iw), F(0.5) * F(ih),
-                                 side, side, 0.0, DETECT_SIZE, cv2.BORDER_CONSTANT)
+                                 side, side, 0.0, DETECT_SIZE, cv2.BORDER_CONSTANT,
+                                 affine=self.fast_crop)
         raw_boxes, raw_scores = self.detector(crop[None])
         dets = decode_detections(raw_boxes[0], raw_scores[0], self.anchors)
         dets = weighted_nms(dets)
@@ -404,6 +421,7 @@ class HandLandmarker:
         crop = crop_rotated_rect(
             image_rgb, F(cx) * F(iw), F(cy) * F(ih), F(rect_w) * F(iw),
             F(rect_h) * F(ih), rotation, LANDMARK_SIZE, cv2.BORDER_REPLICATE,
+            affine=self.fast_crop,
         )
         lm_raw, presence, handedness_raw, world_raw = self.landmarker(crop[None])
 
@@ -417,28 +435,28 @@ class HandLandmarker:
         label, score = ("Right", s) if s >= F(0.5) else ("Left", F(1.0) - s)
 
         # TensorsToLandmarksCalculator: x,y /= 224; z /= 224 then /= 0.4
-        lm = np.asarray(lm_raw).reshape(21, 3)
+        lm = np.asarray(lm_raw, dtype=np.float32).reshape(21, 3)
         size = F(LANDMARK_SIZE)
         nz = F(LANDMARKS_NORMALIZE_Z)
 
-        # LandmarkProjectionCalculator (square-ROI NORM_RECT path), float32
+        # LandmarkProjectionCalculator (square-ROI NORM_RECT path), float32 —
+        # vectorized; identical results to the per-landmark scalar form.
         sin_a, cos_a = F(math.sin(rotation)), F(math.cos(rotation))
-        landmarks = np.zeros((21, 3), dtype=np.float32)
-        world = np.zeros((21, 3), dtype=np.float32)
-        wl = np.asarray(world_raw).reshape(21, 3)
-        for i in range(21):
-            x = lm[i, 0] / size - F(0.5)
-            y = lm[i, 1] / size - F(0.5)
-            z = lm[i, 2] / size / nz
-            nx = cos_a * x - sin_a * y
-            ny = sin_a * x + cos_a * y
-            landmarks[i, 0] = nx * F(rect_w) + F(cx)
-            landmarks[i, 1] = ny * F(rect_h) + F(cy)
-            landmarks[i, 2] = z * F(rect_w)
-            # WorldLandmarkProjectionCalculator: rotate xy by rect angle
-            world[i, 0] = cos_a * wl[i, 0] - sin_a * wl[i, 1]
-            world[i, 1] = sin_a * wl[i, 0] + cos_a * wl[i, 1]
-            world[i, 2] = wl[i, 2]
+        x = lm[:, 0] / size - F(0.5)
+        y = lm[:, 1] / size - F(0.5)
+        z = lm[:, 2] / size / nz
+        nx = cos_a * x - sin_a * y
+        ny = sin_a * x + cos_a * y
+        landmarks = np.stack(
+            [nx * F(rect_w) + F(cx), ny * F(rect_h) + F(cy), z * F(rect_w)],
+            axis=1).astype(np.float32)
+
+        # WorldLandmarkProjectionCalculator: rotate xy by rect angle
+        wl = np.asarray(world_raw, dtype=np.float32).reshape(21, 3)
+        world = np.stack(
+            [cos_a * wl[:, 0] - sin_a * wl[:, 1],
+             sin_a * wl[:, 0] + cos_a * wl[:, 1],
+             wl[:, 2]], axis=1).astype(np.float32)
 
         return {"handedness": label, "score": float(score),
                 "landmarks": landmarks, "world_landmarks": world}

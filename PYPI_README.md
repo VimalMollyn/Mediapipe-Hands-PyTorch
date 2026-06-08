@@ -1,10 +1,10 @@
 # fasthands
 
 **The fastest MediaPipe-compatible hand tracker.** MediaPipe Hands' official
-models running on the Apple Neural Engine via CoreML — **0.7 ms per tracked
-frame** on Apple Silicon, ~5× faster than MediaPipe itself, with a faithful
-port of the full HandLandmarker pipeline (SSD anchors, weighted NMS, ROI
-tracking, landmark projection, deduplication).
+models running on the Apple Neural Engine via CoreML — **0.55 ms per tracked
+frame** on Apple Silicon (1800 FPS), ~6× faster than MediaPipe itself, with a
+faithful port of the full HandLandmarker pipeline (SSD anchors, weighted NMS,
+ROI tracking, landmark projection, deduplication).
 
 macOS / Apple Silicon only.
 
@@ -43,10 +43,11 @@ fasthands-webcam --mirror     # live demo with FPS overlay
 
 | | tracking | detect + track |
 |---|---|---|
-| **fasthands (ANE)** | **0.7 ms** | **1.9 ms** |
-| mediapipe (XNNPACK CPU) | 3.3 ms | 8.7 ms |
+| **fasthands (ANE)** | **0.55 ms (1800 FPS)** | **1.65 ms (600 FPS)** |
+| mediapipe (XNNPACK CPU) | 3.25 ms (310 FPS) | 8.77 ms (115 FPS) |
+| | **5.9× faster** | **5.3× faster** |
 
-Landmarks agree with MediaPipe to ~1e-3 (Neural Engine fp16); the pipeline
+Landmarks agree with MediaPipe to ~9e-4 (Neural Engine fp16); the pipeline
 logic itself is verified to MediaPipe's own float32 reproducibility floor.
 
 ## How

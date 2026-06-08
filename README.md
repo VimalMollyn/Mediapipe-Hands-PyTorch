@@ -1,8 +1,9 @@
 # mediapipe-pytorch
 
-**⚡ FASTEST MEDIAPIPE HAND TRACKER — 5× faster than MediaPipe itself.**
-The CoreML/Neural Engine port tracks a hand in **0.7 ms/frame** (vs MediaPipe's
-3.3 ms on the same M4), with the same models and a faithfully ported pipeline.
+**⚡ FASTEST MEDIAPIPE HAND TRACKER — ~6× faster than MediaPipe itself.**
+The CoreML/Neural Engine port tracks a hand in **0.55 ms/frame** (1800 FPS, vs
+MediaPipe's 3.25 ms on the same M4), with the same models and a faithfully
+ported pipeline.
 
 MediaPipe Hands (`hand_landmarker.task`) running entirely in PyTorch — no mediapipe dependency at inference time — plus a CoreML port for the Neural Engine, packaged as **[`fasthands`](PYPI_README.md)**:
 
@@ -64,9 +65,9 @@ Same pipeline logic, NN inference dispatched to CoreML. Latency per frame
 
 | backend | tracking | detect+track | landmark dev vs mediapipe |
 |---|---|---|---|
-| coreml fp16 ANE | **0.7 ms** | 1.9 ms | 7.7e-4 |
+| **coreml fp16 ANE** | **0.55 ms** | **1.65 ms** | 8.6e-4 |
 | coreml fp16 GPU | 2.4 ms | 3.9 ms | 4.7e-4 |
-| mediapipe (XNNPACK CPU) | 3.3 ms | 8.7 ms | — |
+| mediapipe (XNNPACK CPU) | 3.25 ms | 8.77 ms | — |
 | coreml fp32 CPU | 4.2 ms | 8.9 ms | 7.4e-6 |
 | pytorch MPS | 6.7 ms | 12.0 ms | 1.1e-5 |
 | pytorch CPU | 237 ms | 237 ms | 9.5e-6 |
@@ -74,6 +75,14 @@ Same pipeline logic, NN inference dispatched to CoreML. Latency per frame
 fp16 deviations (~1e-3) are inherent to the Neural Engine's half-precision
 arithmetic — visually indistinguishable; use the fp32 variant when numbers
 need to match the reference closely.
+
+The ANE path is tuned for latency: ROI extraction uses an affine warp
+(`fast_crop`, ~9e-5 vs the exact perspective warp — far below fp16 noise),
+landmark projection is vectorized, and `CPU_AND_NE` avoids the GPU mis-assignment
+the `ALL` planner sometimes makes for the detector. With everything on the
+Neural Engine (all 212 detector ops + landmark model), inference itself is now
+~57% of the tracking budget — the rest is the OpenCV crop. The float32 PyTorch
+reference keeps the exact perspective warp and is unaffected (still 1.5e-5).
 
 ## Architecture
 
