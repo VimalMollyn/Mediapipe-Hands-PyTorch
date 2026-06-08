@@ -43,4 +43,5 @@ dev = [
     "ai-edge-litert>=2.1.5",
     "tflite>=2.18.0",
     "pytest>=8",
+    "scikit-learn>=1.7.2",
 ]

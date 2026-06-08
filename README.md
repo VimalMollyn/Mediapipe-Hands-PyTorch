@@ -76,6 +76,27 @@ fp16 deviations (~1e-3) are inherent to the Neural Engine's half-precision
 arithmetic — visually indistinguishable; use the fp32 variant when numbers
 need to match the reference closely.
 
+### Why not int8 quantization?
+
+Tried and measured (`quantize_experiment.py`) — fp16 wins. On the Neural
+Engine, **fp16 is the native format**, and these models are small enough to be
+*dispatch-bound* (a fixed ~0.3 ms ANE launch latency dominates, not compute),
+so reducing compute via quantization barely helps and the extra
+quantize/dequantize ops can cost more than they save:
+
+| model | fp16 | int8 weights | W8A8 (calibrated) |
+|---|---|---|---|
+| detector predict | **0.84 ms** | 0.93 ms (slower) | 0.90 ms (slower) |
+| landmark predict | 0.31 ms | — | 0.27 ms |
+| landmark end-to-end tracking | **0.55 ms** | — | 0.51 ms |
+| landmark deviation vs mediapipe | **8.6e-4** | — | 2.2e-2 (25× worse) |
+
+Weight-only int8 forces on-the-fly int8→fp16 decompression (pure overhead on a
+fp16 engine). W8A8's 8% landmark gain costs a 25× accuracy hit — not worth it.
+The real remaining lever is *fewer dispatches*: batching both hands into one
+predict (num_hands=2) and pipelining the next frame's crop with the current
+inference. fp16 stays the shipped format.
+
 The ANE path is tuned for latency: ROI extraction uses an affine warp
 (`fast_crop`, ~9e-5 vs the exact perspective warp — far below fp16 noise),
 landmark projection is vectorized, and `CPU_AND_NE` avoids the GPU mis-assignment
